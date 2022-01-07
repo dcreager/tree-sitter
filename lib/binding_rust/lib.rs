@@ -7,11 +7,16 @@ use std::os::unix::io::AsRawFd;
 use std::{
     char, error,
     ffi::CStr,
-    fmt, hash, iter,
+    fmt,
+    fs::File,
+    hash,
+    io::Read,
+    iter,
     marker::PhantomData,
     mem::MaybeUninit,
     ops,
     os::raw::{c_char, c_void},
+    path::Path,
     ptr::{self, NonNull},
     slice, str,
     sync::atomic::AtomicUsize,
@@ -187,6 +192,7 @@ pub struct QueryError {
     pub row: usize,
     pub column: usize,
     pub offset: usize,
+    pub part: Option<usize>,
     pub message: String,
     pub kind: QueryErrorKind,
 }
@@ -1234,6 +1240,7 @@ impl Query {
                     row: 0,
                     column: 0,
                     offset: 0,
+                    part: None,
                     message: LanguageError {
                         version: language.version(),
                     }
@@ -1295,6 +1302,7 @@ impl Query {
                 row,
                 column,
                 offset,
+                part: None,
                 kind,
                 message,
             });
@@ -1998,6 +2006,100 @@ impl Drop for QueryCursor {
     }
 }
 
+/// Lets you build up a large Query from the content of multiple files or strings, or portions of a
+/// file.
+#[derive(Default)]
+pub struct MultipartQuery {
+    merged_content: String,
+    ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl MultipartQuery {
+    pub fn new() -> MultipartQuery {
+        MultipartQuery::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// Returns the source of a particular query part
+    pub fn get_part(&self, index: usize) -> &str {
+        &self.merged_content[self.ranges[index].clone()]
+    }
+
+    /// Returns the combined source of a range of query parts
+    pub fn get_parts(&self, range: std::ops::Range<usize>) -> &str {
+        let start = &self.ranges[range.start];
+        let end = &self.ranges[range.end];
+        &self.merged_content[start.start..end.end]
+    }
+
+    /// Returns the part that contains the specified byte offset in the overall compiled query.
+    pub fn get_part_for_byte_offset(&self, offset: usize) -> Option<usize> {
+        self.ranges.iter().position(|probe| probe.contains(&offset))
+    }
+
+    /// Given a byte offset in the overall compiled query, return the byte offset of that position
+    /// within its containing part.
+    pub fn get_byte_offset_within_part(&self, offset: usize) -> Option<usize> {
+        self.get_part_for_byte_offset(offset)
+            .map(|index| offset - self.ranges[index].start)
+    }
+
+    /// Compiles this multipart query, returning a Query instance.  If any query error occurs, its
+    /// location information will be relative to the part that the error occurred in.
+    pub fn compile(&self, language: Language) -> Result<Query, QueryError> {
+        let query = Query::new(language, &self.merged_content);
+        let mut query_error = match query {
+            Ok(query) => return Ok(query),
+            Err(error) => error,
+        };
+        let part = self.get_part_for_byte_offset(query_error.offset);
+        if let Some(part) = part {
+            let start = self.ranges[part].start;
+            query_error.part = Some(part);
+            query_error.offset -= start;
+            query_error.row = self.merged_content[start..query_error.offset]
+                .chars()
+                .filter(|c| *c == '\n')
+                .count();
+        }
+        Err(query_error)
+    }
+
+    /// Adds a new part to the multipart query.  Returns the index of the new part, which will be
+    /// the value of the `part` field of any query errors that occur in this part.
+    pub fn add_part<S: AsRef<str>>(&mut self, part: S) -> usize {
+        let part_index = self.ranges.len();
+        let part = part.as_ref();
+        let part_offset = self.merged_content.len();
+        let part_len = part.len();
+        self.merged_content.push_str(part);
+        self.ranges.push(part_offset..part_offset + part_len);
+        part_index
+    }
+
+    /// Adds a new part to the multipart query, whose content comes from a file.  Returns the index
+    /// of the new part, which will be the value of the `part` field of any query errors that occur
+    /// in this part.
+    pub fn add_part_from_file(&mut self, file: &mut File) -> std::io::Result<usize> {
+        let part_index = self.ranges.len();
+        let part_offset = self.merged_content.len();
+        let part_len = file.read_to_string(&mut self.merged_content)?;
+        self.ranges.push(part_offset..part_offset + part_len);
+        Ok(part_index)
+    }
+
+    /// Adds a new part to the multipart query, whose content comes from a file path.  Returns the
+    /// index of the new part, which will be the value of the `part` field of any query errors that
+    /// occur in this part.
+    pub fn add_part_from_path<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<usize> {
+        let mut file = File::open(path)?;
+        self.add_part_from_file(&mut file)
+    }
+}
+
 impl Point {
     pub fn new(row: usize, column: usize) -> Self {
         Point { row, column }
@@ -2115,6 +2217,7 @@ fn predicate_error(row: usize, message: String) -> QueryError {
         row,
         column: 0,
         offset: 0,
+        part: None,
         message,
     }
 }

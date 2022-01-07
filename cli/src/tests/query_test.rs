@@ -197,6 +197,7 @@ fn test_query_errors_on_invalid_symbols() {
                 row: 0,
                 offset: 1,
                 column: 1,
+                part: None,
                 kind: QueryErrorKind::NodeType,
                 message: "clas".to_string()
             }
@@ -207,6 +208,7 @@ fn test_query_errors_on_invalid_symbols() {
                 row: 0,
                 offset: 15,
                 column: 15,
+                part: None,
                 kind: QueryErrorKind::NodeType,
                 message: "arrayyyyy".to_string()
             },
@@ -217,6 +219,7 @@ fn test_query_errors_on_invalid_symbols() {
                 row: 0,
                 offset: 26,
                 column: 26,
+                part: None,
                 kind: QueryErrorKind::NodeType,
                 message: "non_existent3".to_string()
             },
@@ -227,6 +230,7 @@ fn test_query_errors_on_invalid_symbols() {
                 row: 0,
                 offset: 14,
                 column: 14,
+                part: None,
                 kind: QueryErrorKind::Field,
                 message: "condit".to_string()
             },
@@ -237,6 +241,7 @@ fn test_query_errors_on_invalid_symbols() {
                 row: 0,
                 offset: 14,
                 column: 14,
+                part: None,
                 kind: QueryErrorKind::Field,
                 message: "conditioning".to_string()
             }
@@ -247,6 +252,7 @@ fn test_query_errors_on_invalid_symbols() {
                 row: 0,
                 offset: 15,
                 column: 15,
+                part: None,
                 kind: QueryErrorKind::Field,
                 message: "alternativ".to_string()
             }
@@ -257,6 +263,7 @@ fn test_query_errors_on_invalid_symbols() {
                 row: 0,
                 offset: 15,
                 column: 15,
+                part: None,
                 kind: QueryErrorKind::Field,
                 message: "alternatives".to_string()
             }
@@ -276,6 +283,7 @@ fn test_query_errors_on_invalid_predicates() {
                 row: 0,
                 column: 19,
                 offset: 19,
+                part: None,
                 message: [
                     "((identifier) @id (@id))", //
                     "                   ^"
@@ -290,6 +298,7 @@ fn test_query_errors_on_invalid_predicates() {
                 row: 0,
                 column: 0,
                 offset: 0,
+                part: None,
                 message: "Wrong number of arguments to #eq? predicate. Expected 2, got 1."
                     .to_string()
             }
@@ -301,6 +310,7 @@ fn test_query_errors_on_invalid_predicates() {
                 row: 0,
                 column: 29,
                 offset: 29,
+                part: None,
                 message: "ok".to_string(),
             }
         );
@@ -323,6 +333,7 @@ fn test_query_errors_on_impossible_patterns() {
                 row: 0,
                 offset: 38,
                 column: 38,
+                part: None,
                 message: [
                     "(binary_expression left: (identifier) left: (identifier))",
                     "                                      ^"
@@ -343,6 +354,7 @@ fn test_query_errors_on_impossible_patterns() {
                 row: 0,
                 offset: 22,
                 column: 22,
+                part: None,
                 message: [
                     "(function_declaration name: (statement_block))",
                     "                      ^",
@@ -359,6 +371,7 @@ fn test_query_errors_on_impossible_patterns() {
                 row: 0,
                 offset: 6,
                 column: 6,
+                part: None,
                 message: [
                     "(call receiver:(binary))", //
                     "      ^",
@@ -390,6 +403,7 @@ fn test_query_errors_on_impossible_patterns() {
                 row: 2,
                 offset: 88,
                 column: 42,
+                part: None,
                 message: [
                     "                    (function_declaration (object))", //
                     "                                          ^",
@@ -405,6 +419,7 @@ fn test_query_errors_on_impossible_patterns() {
                 row: 0,
                 offset: 12,
                 column: 12,
+                part: None,
                 message: [
                     "(identifier (identifier))", //
                     "            ^",
@@ -419,6 +434,7 @@ fn test_query_errors_on_impossible_patterns() {
                 row: 0,
                 offset: 6,
                 column: 6,
+                part: None,
                 message: [
                     "(true (true))", //
                     "      ^",
@@ -441,6 +457,7 @@ fn test_query_errors_on_impossible_patterns() {
                 row: 0,
                 offset: 14,
                 column: 14,
+                part: None,
                 message: [
                     "(if_statement condition: (_expression))", //
                     "              ^",
@@ -465,6 +482,7 @@ fn test_query_verifies_possible_patterns_with_aliased_parent_nodes() {
                 row: 0,
                 offset: 24,
                 column: 24,
+                part: None,
                 message: [
                     "(destructured_parameter (string))", //
                     "                        ^",
