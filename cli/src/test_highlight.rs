@@ -51,7 +51,7 @@ pub fn test_highlights(loader: &Loader, directory: &Path) -> Result<()> {
             .language_configuration_for_file_name(&test_file_path)?
             .ok_or_else(|| anyhow!("No language found for path {:?}", test_file_path))?;
         let highlight_config = language_config
-            .highlight_config(language)?
+            .highlight_config(language, None)?
             .ok_or_else(|| anyhow!("No highlighting config found for {:?}", test_file_path))?;
         match test_highlight(
             &loader,
@@ -86,7 +86,7 @@ pub fn test_highlights(loader: &Loader, directory: &Path) -> Result<()> {
 pub fn iterate_assertions(
     assertions: &Vec<Assertion>,
     highlights: &Vec<(Point, Point, Highlight)>,
-    highlight_names: &Vec<String>,
+    highlight_names: &[String],
 ) -> Result<usize> {
     // Iterate through all of the highlighting assertions, checking each one against the
     // actual highlights.
@@ -157,12 +157,12 @@ pub fn test_highlight(
     source: &[u8],
 ) -> Result<usize> {
     // Highlight the file, and parse out all of the highlighting assertions.
-    let highlight_names = loader.highlight_names();
+    let highlight_names = highlight_config.names();
     let highlights = get_highlight_positions(loader, highlighter, highlight_config, source)?;
     let assertions =
         parse_position_comments(highlighter.parser(), highlight_config.language, source)?;
 
-    iterate_assertions(&assertions, &highlights, &highlight_names)?;
+    iterate_assertions(&assertions, &highlights, highlight_names)?;
 
     // Iterate through all of the highlighting assertions, checking each one against the
     // actual highlights.
@@ -241,7 +241,7 @@ pub fn get_highlight_positions(
     let source = String::from_utf8_lossy(source);
     let mut char_indices = source.char_indices();
     for event in highlighter.highlight(highlight_config, source.as_bytes(), None, |string| {
-        loader.highlight_config_for_injection_string(string)
+        loader.highlight_config_for_injection_string(string, None)
     })? {
         match event? {
             HighlightEvent::HighlightStart(h) => highlight_stack.push(h),

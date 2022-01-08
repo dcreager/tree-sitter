@@ -430,7 +430,6 @@ fn run() -> Result<()> {
 
         ("highlight", Some(matches)) => {
             let theme_config: tree_sitter_cli::highlight::ThemeConfig = config.get()?;
-            loader.configure_highlights(&theme_config.theme.highlight_names);
             let loader_config = config.get()?;
             loader.find_all_languages(&loader_config)?;
 
@@ -466,7 +465,9 @@ fn run() -> Result<()> {
                     },
                 };
 
-                if let Some(highlight_config) = language_config.highlight_config(language)? {
+                let highlight_config = language_config
+                    .highlight_config(language, Some(&theme_config.theme.highlight_names))?;
+                if let Some(highlight_config) = highlight_config {
                     let source = fs::read(path)?;
                     if html_mode {
                         highlight::html(

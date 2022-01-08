@@ -8,7 +8,6 @@ use std::io::BufReader;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
 use std::time::SystemTime;
 use std::{fs, mem};
 use tree_sitter::{Language, MultipartQuery, QueryError, QueryErrorKind};
@@ -75,7 +74,7 @@ const DYLIB_EXTENSION: &'static str = "dll";
 
 const BUILD_TARGET: &'static str = env!("BUILD_TARGET");
 
-pub struct LanguageConfiguration<'a> {
+pub struct LanguageConfiguration {
     pub scope: Option<String>,
     pub content_regex: Option<Regex>,
     pub _first_line_regex: Option<Regex>,
@@ -89,17 +88,13 @@ pub struct LanguageConfiguration<'a> {
     language_id: usize,
     highlight_config: OnceCell<Option<HighlightConfiguration>>,
     tags_config: OnceCell<Option<TagsConfiguration>>,
-    highlight_names: &'a Mutex<Vec<String>>,
-    use_all_highlight_names: bool,
 }
 
 pub struct Loader {
     parser_lib_path: PathBuf,
     languages_by_id: Vec<(PathBuf, OnceCell<Language>)>,
-    language_configurations: Vec<LanguageConfiguration<'static>>,
+    language_configurations: Vec<LanguageConfiguration>,
     language_configuration_ids_by_file_type: HashMap<String, Vec<usize>>,
-    highlight_names: Box<Mutex<Vec<String>>>,
-    use_all_highlight_names: bool,
     debug_build: bool,
 }
 
@@ -120,21 +115,8 @@ impl Loader {
             languages_by_id: Vec::new(),
             language_configurations: Vec::new(),
             language_configuration_ids_by_file_type: HashMap::new(),
-            highlight_names: Box::new(Mutex::new(Vec::new())),
-            use_all_highlight_names: true,
             debug_build: false,
         }
-    }
-
-    pub fn configure_highlights(&mut self, names: &Vec<String>) {
-        self.use_all_highlight_names = false;
-        let mut highlights = self.highlight_names.lock().unwrap();
-        highlights.clear();
-        highlights.extend(names.iter().cloned());
-    }
-
-    pub fn highlight_names(&self) -> Vec<String> {
-        self.highlight_names.lock().unwrap().clone()
     }
 
     pub fn find_all_languages(&mut self, config: &Config) -> Result<()> {
@@ -443,10 +425,11 @@ impl Loader {
         Ok(language)
     }
 
-    pub fn highlight_config_for_injection_string<'a>(
-        &'a self,
+    pub fn highlight_config_for_injection_string(
+        &self,
         string: &str,
-    ) -> Option<&'a HighlightConfiguration> {
+        highlight_names: Option<&Vec<String>>,
+    ) -> Option<&HighlightConfiguration> {
         match self.language_configuration_for_injection_string(string) {
             Err(e) => {
                 eprintln!(
@@ -456,22 +439,24 @@ impl Loader {
                 None
             }
             Ok(None) => None,
-            Ok(Some((language, configuration))) => match configuration.highlight_config(language) {
-                Err(e) => {
-                    eprintln!(
-                        "Failed to load property sheet for injection string '{}': {}",
-                        string, e
-                    );
-                    None
+            Ok(Some((language, configuration))) => {
+                match configuration.highlight_config(language, highlight_names) {
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to load property sheet for injection string '{}': {}",
+                            string, e
+                        );
+                        None
+                    }
+                    Ok(None) => None,
+                    Ok(Some(config)) => Some(config),
                 }
-                Ok(None) => None,
-                Ok(Some(config)) => Some(config),
-            },
+            }
         }
     }
 
-    pub fn find_language_configurations_at_path<'a>(
-        &'a mut self,
+    pub fn find_language_configurations_at_path(
+        &mut self,
         parser_path: &Path,
     ) -> Result<&[LanguageConfiguration]> {
         #[derive(Deserialize)]
@@ -570,8 +555,6 @@ impl Loader {
                         highlights_filenames: config_json.highlights.into_vec(),
                         highlight_config: OnceCell::new(),
                         tags_config: OnceCell::new(),
-                        highlight_names: &*self.highlight_names,
-                        use_all_highlight_names: self.use_all_highlight_names,
                     };
 
                     for file_type in &configuration.file_types {
@@ -604,8 +587,6 @@ impl Loader {
                 tags_filenames: None,
                 highlight_config: OnceCell::new(),
                 tags_config: OnceCell::new(),
-                highlight_names: &*self.highlight_names,
-                use_all_highlight_names: self.use_all_highlight_names,
             };
             self.language_configurations
                 .push(unsafe { mem::transmute(configuration) });
@@ -662,7 +643,7 @@ impl Loader {
     }
 }
 
-impl<'a> LanguageConfiguration<'a> {
+impl LanguageConfiguration {
     /// Loads tree-sitter queries from with a grammar repo into a [`Multiquery`][].
     ///
     /// You provide a `default_path`, which is the default location in the grammar repo where we
@@ -701,7 +682,11 @@ impl<'a> LanguageConfiguration<'a> {
         Ok(())
     }
 
-    pub fn highlight_config(&self, language: Language) -> Result<Option<&HighlightConfiguration>> {
+    pub fn highlight_config(
+        &self,
+        language: Language,
+        highlight_names: Option<&Vec<String>>,
+    ) -> Result<Option<&HighlightConfiguration>> {
         return self
             .highlight_config
             .get_or_try_init(|| {
@@ -748,15 +733,10 @@ impl<'a> LanguageConfiguration<'a> {
                             }
                         }
                     })?;
-                    let mut all_highlight_names = self.highlight_names.lock().unwrap();
-                    if self.use_all_highlight_names {
-                        for capture_name in result.query.capture_names() {
-                            if !all_highlight_names.contains(capture_name) {
-                                all_highlight_names.push(capture_name.clone());
-                            }
-                        }
+                    match highlight_names {
+                        Some(highlight_names) => result.configure(highlight_names),
+                        None => result.configure_all_highlights(),
                     }
-                    result.configure(&all_highlight_names.as_slice());
                     Ok(Some(result))
                 }
             })

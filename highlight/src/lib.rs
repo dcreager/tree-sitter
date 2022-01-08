@@ -321,6 +321,16 @@ impl HighlightConfiguration {
                 best_index.map(Highlight)
             }));
     }
+
+    pub fn configure_all_highlights(&mut self) {
+        let mut all_highlight_names = Vec::new();
+        for capture_name in self.query.capture_names() {
+            if !all_highlight_names.contains(capture_name) {
+                all_highlight_names.push(capture_name.clone());
+            }
+        }
+        self.configure(&all_highlight_names);
+    }
 }
 
 impl<'a> HighlightIterLayer<'a> {
