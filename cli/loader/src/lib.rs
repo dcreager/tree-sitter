@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::SystemTime;
 use std::{fs, mem};
-use tree_sitter::{Language, QueryError, QueryErrorKind};
+use tree_sitter::{Language, MultipartQuery, QueryError, QueryErrorKind};
 use tree_sitter_highlight::HighlightConfiguration;
 use tree_sitter_tags::{Error as TagsError, TagsConfiguration};
 
@@ -663,6 +663,44 @@ impl Loader {
 }
 
 impl<'a> LanguageConfiguration<'a> {
+    /// Loads tree-sitter queries from with a grammar repo into a [`Multiquery`][].
+    ///
+    /// You provide a `default_path`, which is the default location in the grammar repo where we
+    /// expect to find a query file.  You can also allow the grammar author to override this
+    /// default location with a _list_ of filenames; if this list exists for this grammar, then we
+    /// read from those files _instead_ of the default path.
+    ///
+    /// The contents of the query file(s) are added to `multiquery`, and the path of each file is
+    /// added to `found_paths`.  (That lets you annotate any error messages with the path of each
+    /// query file at some point down the line when you compile the multiquery.)
+    pub fn read_query_files(
+        &self,
+        multiquery: &mut MultipartQuery,
+        found_paths: &mut Vec<PathBuf>,
+        override_paths: &Option<Vec<PathBuf>>,
+        default_path: &Path,
+    ) -> Result<()> {
+        if let Some(paths) = override_paths.as_ref() {
+            for path in paths {
+                let abs_path = self.root_path.join(path);
+                multiquery
+                    .add_part_from_path(&abs_path)
+                    .with_context(|| format!("Failed to read query file {:?}", path))?;
+                found_paths.push(path.clone());
+            }
+        } else {
+            let queries_path = self.root_path.join("queries");
+            let path = queries_path.join(default_path);
+            if path.exists() {
+                multiquery
+                    .add_part_from_path(&path)
+                    .with_context(|| format!("Failed to read query file {:?}", path))?;
+                found_paths.push(default_path.to_owned());
+            }
+        }
+        Ok(())
+    }
+
     pub fn highlight_config(&self, language: Language) -> Result<Option<&HighlightConfiguration>> {
         return self
             .highlight_config
