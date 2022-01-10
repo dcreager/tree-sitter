@@ -86,6 +86,7 @@ pub struct LanguageConfiguration<'a> {
     pub injections_filenames: Option<Vec<String>>,
     pub locals_filenames: Option<Vec<String>>,
     pub tags_filenames: Option<Vec<String>>,
+    language: OnceCell<Language>,
     language_id: usize,
     highlight_config: OnceCell<Option<HighlightConfiguration>>,
     tags_config: OnceCell<Option<TagsConfiguration>>,
@@ -95,7 +96,7 @@ pub struct LanguageConfiguration<'a> {
 
 pub struct Loader {
     parser_lib_path: PathBuf,
-    languages_by_id: Vec<(PathBuf, OnceCell<Language>)>,
+    languages_by_id: Vec<PathBuf>,
     language_configurations: Vec<LanguageConfiguration<'static>>,
     language_configuration_ids_by_file_type: HashMap<String, Vec<usize>>,
     highlight_names: Box<Mutex<Vec<String>>>,
@@ -183,7 +184,7 @@ impl Loader {
     pub fn get_all_language_configurations(&self) -> Vec<(&LanguageConfiguration, &Path)> {
         self.language_configurations
             .iter()
-            .map(|c| (c, self.languages_by_id[c.language_id].0.as_ref()))
+            .map(|c| (c, self.languages_by_id[c.language_id].as_ref()))
             .collect()
     }
 
@@ -298,10 +299,16 @@ impl Loader {
         }
     }
 
+    pub fn load_language(&self, config: &LanguageConfiguration) -> Result<Language> {
+        self.language_for_id(config.language_id)
+    }
+
     fn language_for_id(&self, id: usize) -> Result<Language> {
-        let (path, language) = &self.languages_by_id[id];
-        language
+        let config = &self.language_configurations[id];
+        config
+            .language
             .get_or_try_init(|| {
+                let path = &self.languages_by_id[id];
                 let src_path = path.join("src");
                 self.load_language_at_path(&src_path, &src_path)
             })
@@ -542,9 +549,7 @@ impl Loader {
                     // Determine if a previous language configuration in this package.json file
                     // already uses the same language.
                     let mut language_id = None;
-                    for (id, (path, _)) in
-                        self.languages_by_id.iter().enumerate().skip(language_count)
-                    {
+                    for (id, path) in self.languages_by_id.iter().enumerate().skip(language_count) {
                         if language_path == *path {
                             language_id = Some(id);
                         }
@@ -552,13 +557,14 @@ impl Loader {
 
                     // If not, add a new language path to the list.
                     let language_id = language_id.unwrap_or_else(|| {
-                        self.languages_by_id.push((language_path, OnceCell::new()));
+                        self.languages_by_id.push(language_path);
                         self.languages_by_id.len() - 1
                     });
 
                     let configuration = LanguageConfiguration {
                         root_path: parser_path.to_path_buf(),
                         scope: config_json.scope,
+                        language: OnceCell::new(),
                         language_id,
                         file_types: config_json.file_types.unwrap_or(Vec::new()),
                         content_regex: Self::regex(config_json.content_regex),
@@ -592,6 +598,7 @@ impl Loader {
         {
             let configuration = LanguageConfiguration {
                 root_path: parser_path.to_owned(),
+                language: OnceCell::new(),
                 language_id: self.languages_by_id.len(),
                 file_types: Vec::new(),
                 scope: None,
@@ -609,8 +616,7 @@ impl Loader {
             };
             self.language_configurations
                 .push(unsafe { mem::transmute(configuration) });
-            self.languages_by_id
-                .push((parser_path.to_owned(), OnceCell::new()));
+            self.languages_by_id.push(parser_path.to_owned());
         }
 
         Ok(&self.language_configurations[initial_language_configuration_count..])
