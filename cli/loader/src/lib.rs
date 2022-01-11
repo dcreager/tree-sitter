@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 use std::{fs, mem};
-use tree_sitter::{Language, MultipartQuery, QueryError, QueryErrorKind};
-use tree_sitter_highlight::HighlightConfiguration;
+use tree_sitter::{Language, MultipartQuery, QueryError};
+use tree_sitter_highlight::{HighlightConfiguration, HighlightConfigurationBuilder};
 use tree_sitter_tags::{Error as TagsError, TagsConfiguration};
 
 #[derive(Default, Deserialize, Serialize)]
@@ -690,55 +690,42 @@ impl LanguageConfiguration {
         return self
             .highlight_config
             .get_or_try_init(|| {
-                let (highlights_query, highlight_ranges) =
-                    self.read_queries(&self.highlights_filenames, "highlights.scm")?;
-                let (injections_query, injection_ranges) =
-                    self.read_queries(&self.injections_filenames, "injections.scm")?;
-                let (locals_query, locals_ranges) =
-                    self.read_queries(&self.locals_filenames, "locals.scm")?;
-
-                if highlights_query.is_empty() {
-                    Ok(None)
-                } else {
-                    let mut result = HighlightConfiguration::new(
-                        language,
-                        &highlights_query,
-                        &injections_query,
-                        &locals_query,
-                    )
-                    .map_err(|error| match error.kind {
-                        QueryErrorKind::Language => Error::from(error),
-                        _ => {
-                            if error.offset < injections_query.len() {
-                                Self::include_path_in_query_error(
-                                    error,
-                                    &injection_ranges,
-                                    &injections_query,
-                                    0,
-                                )
-                            } else if error.offset < injections_query.len() + locals_query.len() {
-                                Self::include_path_in_query_error(
-                                    error,
-                                    &locals_ranges,
-                                    &locals_query,
-                                    injections_query.len(),
-                                )
-                            } else {
-                                Self::include_path_in_query_error(
-                                    error,
-                                    &highlight_ranges,
-                                    &highlights_query,
-                                    injections_query.len() + locals_query.len(),
-                                )
-                            }
-                        }
-                    })?;
-                    match highlight_names {
-                        Some(highlight_names) => result.configure(highlight_names),
-                        None => result.configure_all_highlights(),
-                    }
-                    Ok(Some(result))
+                let mut builder = HighlightConfigurationBuilder::new();
+                let mut paths = Vec::new();
+                for (path, contents) in
+                    self.read_files(&self.highlights_filenames, "queries/highlights.scm")?
+                {
+                    paths.push(path);
+                    builder.add_highlights_query_part(&contents);
                 }
+                if paths.is_empty() {
+                    return Ok(None);
+                }
+                for (path, contents) in
+                    self.read_files(&self.injections_filenames, "queries/injections.scm")?
+                {
+                    paths.push(path);
+                    builder.add_injections_query_part(&contents);
+                }
+                for (path, contents) in
+                    self.read_files(&self.locals_filenames, "queries/locals.scm")?
+                {
+                    paths.push(path);
+                    builder.add_locals_query_part(&contents);
+                }
+
+                if let Some(highlight_names) = highlight_names {
+                    builder.set_recognized_names(highlight_names.to_vec());
+                }
+
+                let result = builder.build(language).map_err(|error| {
+                    if let Some(part) = error.part {
+                        Error::from(error).context(format!("Error in query file {:?}", paths[part]))
+                    } else {
+                        Error::from(error)
+                    }
+                })?;
+                Ok(Some(result))
             })
             .map(Option::as_ref);
     }
@@ -799,6 +786,44 @@ impl LanguageConfiguration {
             .filter(|c| *c == '\n')
             .count();
         Error::from(error).context(format!("Error in query file {:?}", path))
+    }
+
+    /// Reads in the contents of one or more files in this language grammar's parser repository.
+    /// You provide a default path to read from, along with a list of override paths that the
+    /// grammar author can specify in their `package.json` file.
+    ///
+    /// If the override path list is given, then we try to read in all of those files.  If any of
+    /// them don't exist, we consider that an error.  (If the grammar author mentions a file in the
+    /// override list, we assume that they expect that file to exist.)
+    ///
+    /// If the override path list is **not** given, then we try to read in the file at the default
+    /// path.  It is **not** an error for that file to not exist; in that case, we return an empty
+    /// vector.
+    ///
+    /// In either case, the result is a vector of file paths (relative to the parser repository
+    /// directory), along with their contents (read into a `String`).
+    pub fn read_files(
+        &self,
+        override_paths: &Option<Vec<String>>,
+        default_path: &str,
+    ) -> Result<Vec<(PathBuf, String)>> {
+        let mut result = Vec::new();
+        if let Some(override_paths) = override_paths.as_ref() {
+            for path in override_paths {
+                let abs_path = self.root_path.join(path);
+                let contents = fs::read_to_string(&abs_path)
+                    .with_context(|| format!("Failed to read query file {:?}", path))?;
+                result.push((path.clone().into(), contents));
+            }
+        } else {
+            let abs_path = self.root_path.join(default_path);
+            if abs_path.exists() {
+                let contents = fs::read_to_string(&abs_path)
+                    .with_context(|| format!("Failed to read query file {:?}", default_path))?;
+                result.push((default_path.to_string().into(), contents));
+            }
+        }
+        Ok(result)
     }
 
     fn read_queries(

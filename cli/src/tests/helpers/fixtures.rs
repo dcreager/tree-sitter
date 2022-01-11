@@ -2,7 +2,7 @@ use lazy_static::lazy_static;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tree_sitter::Language;
-use tree_sitter_highlight::HighlightConfiguration;
+use tree_sitter_highlight::{HighlightConfiguration, HighlightConfigurationBuilder};
 use tree_sitter_loader::Loader;
 
 include!("./dirs.rs");
@@ -32,26 +32,22 @@ pub fn get_language_queries_path(language_name: &str) -> PathBuf {
 pub fn get_highlight_config(
     language_name: &str,
     injection_query_filename: Option<&str>,
-    highlight_names: &[String],
+    highlight_names: Vec<String>,
 ) -> HighlightConfiguration {
     let language = get_language(language_name);
     let queries_path = get_language_queries_path(language_name);
+    let mut builder = HighlightConfigurationBuilder::new();
     let highlights_query = fs::read_to_string(queries_path.join("highlights.scm")).unwrap();
-    let injections_query = if let Some(injection_query_filename) = injection_query_filename {
-        fs::read_to_string(queries_path.join(injection_query_filename)).unwrap()
-    } else {
-        String::new()
-    };
+    builder.add_highlights_query_part(&highlights_query);
+    if let Some(injection_query_filename) = injection_query_filename {
+        let injections_query =
+            fs::read_to_string(queries_path.join(injection_query_filename)).unwrap();
+        builder.add_injections_query_part(&injections_query);
+    }
     let locals_query = fs::read_to_string(queries_path.join("locals.scm")).unwrap_or(String::new());
-    let mut result = HighlightConfiguration::new(
-        language,
-        &highlights_query,
-        &injections_query,
-        &locals_query,
-    )
-    .unwrap();
-    result.configure(&highlight_names);
-    result
+    builder.add_locals_query_part(&locals_query);
+    builder.set_recognized_names(highlight_names);
+    builder.build(language).unwrap()
 }
 
 pub fn get_test_language(name: &str, parser_code: &str, path: Option<&Path>) -> Language {

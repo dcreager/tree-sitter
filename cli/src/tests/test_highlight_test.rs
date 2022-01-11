@@ -10,7 +10,7 @@ fn test_highlight_test_with_basic_test() {
     let config = get_highlight_config(
         "javascript",
         Some("injections.scm"),
-        &[
+        vec![
             "function".to_string(),
             "variable.parameter".to_string(),
             "keyword".to_string(),

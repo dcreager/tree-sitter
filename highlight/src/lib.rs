@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{iter, mem, ops, str, usize};
 use thiserror::Error;
 use tree_sitter::{
-    Language, LossyUtf8, Node, Parser, Point, Query, QueryCaptures, QueryCursor, QueryError,
-    QueryMatch, Range, Tree,
+    Language, LossyUtf8, MultipartQuery, Node, Parser, Point, Query, QueryCaptures, QueryCursor,
+    QueryError, QueryMatch, Range, Tree,
 };
 
 const CANCELLATION_CHECK_INTERVAL: usize = 100;
@@ -37,6 +37,186 @@ pub enum HighlightEvent {
     HighlightEnd,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PatternKind {
+    Highlights,
+    Injections,
+    Locals,
+}
+
+#[derive(Default)]
+pub struct HighlightConfigurationBuilder {
+    query: MultipartQuery,
+    combined_injections_query: MultipartQuery,
+    part_kinds: Vec<PatternKind>,
+    recognized_names: Option<Vec<String>>,
+}
+
+impl HighlightConfigurationBuilder {
+    pub fn new() -> HighlightConfigurationBuilder {
+        HighlightConfigurationBuilder::default()
+    }
+
+    fn add_query_part(&mut self, query: &str, kind: PatternKind) {
+        self.part_kinds.push(kind);
+        self.query.add_part(query);
+        // We're going to disable all non-injections query in combined_injections_query, but
+        // several parts of the algorithm below assume that the two queries have consistent pattern
+        // indexes.
+        self.combined_injections_query.add_part(query);
+    }
+
+    /// Adds query patterns for syntax highlighting.  There should be at least one of these,
+    /// otherwise no syntax highlights will be added.
+    pub fn add_highlights_query_part(&mut self, query: &str) {
+        self.add_query_part(query, PatternKind::Highlights);
+    }
+
+    /// Adds query patterns for injecting other languages into the document.  This can be empty if
+    /// no injections are desired.
+    pub fn add_injections_query_part(&mut self, query: &str) {
+        self.add_query_part(query, PatternKind::Injections);
+    }
+
+    /// Adds query patterns for tracking local variable definitions and references.  This can be
+    /// empty if local variable tracking is not needed.
+    pub fn add_locals_query_part(&mut self, query: &str) {
+        self.add_query_part(query, PatternKind::Locals);
+    }
+
+    /// Set the list of recognized highlight names.
+    ///
+    /// Tree-sitter syntax-highlighting queries specify highlights in the form of dot-separated
+    /// highlight names like `punctuation.bracket` and `function.method.builtin`. Consumers of
+    /// these queries can choose to recognize highlights with different levels of specificity.
+    /// For example, the string `function.builtin` will match against `function.method.builtin`
+    /// and `function.builtin.constructor`, but will not match `function.method`.
+    ///
+    /// When highlighting, results are returned as `Highlight` values, which contain the index
+    /// of the matched highlight this list of highlight names.
+    pub fn set_recognized_names(&mut self, recognized_names: Vec<String>) {
+        self.recognized_names = Some(recognized_names);
+    }
+
+    /// Creates a `HighlightConfiguration` for a given `Language` and the highlighting queries that
+    /// have been added to this builder.
+    pub fn build(self, language: Language) -> Result<HighlightConfiguration, QueryError> {
+        let mut query = self.query.compile(language)?;
+        let mut pattern_kinds = Vec::with_capacity(query.pattern_count());
+        for i in 0..query.pattern_count() {
+            let offset = query.start_byte_for_pattern(i);
+            let part = self.query.get_part_for_byte_offset(offset).unwrap();
+            pattern_kinds.push(self.part_kinds[part]);
+        }
+
+        // Construct a separate query just for dealing with the 'combined injections'.
+        // Disable the combined injection patterns in the main query.
+        let mut combined_injections_query = self.combined_injections_query.compile(language)?;
+        let mut has_combined_queries = false;
+        for (pattern_index, kind) in pattern_kinds.iter().enumerate() {
+            if *kind != PatternKind::Injections {
+                combined_injections_query.disable_pattern(pattern_index);
+                continue;
+            }
+            let settings = query.property_settings(pattern_index);
+            if settings.iter().any(|s| &*s.key == "injection.combined") {
+                has_combined_queries = true;
+                query.disable_pattern(pattern_index);
+            } else {
+                combined_injections_query.disable_pattern(pattern_index);
+            }
+        }
+        let combined_injections_query = if has_combined_queries {
+            Some(combined_injections_query)
+        } else {
+            None
+        };
+
+        // Find all of the highlighting patterns that are disabled for nodes that
+        // have been identified as local variables.
+        let non_local_variable_patterns = (0..query.pattern_count())
+            .map(|i| {
+                query
+                    .property_predicates(i)
+                    .iter()
+                    .any(|(prop, positive)| !*positive && prop.key.as_ref() == "local")
+            })
+            .collect();
+
+        // Store the numeric ids for all of the special captures.
+        let mut injection_content_capture_index = None;
+        let mut injection_language_capture_index = None;
+        let mut local_def_capture_index = None;
+        let mut local_def_value_capture_index = None;
+        let mut local_ref_capture_index = None;
+        let mut local_scope_capture_index = None;
+        for (i, name) in query.capture_names().iter().enumerate() {
+            let i = Some(i as u32);
+            match name.as_str() {
+                "injection.content" => injection_content_capture_index = i,
+                "injection.language" => injection_language_capture_index = i,
+                "local.definition" => local_def_capture_index = i,
+                "local.definition-value" => local_def_value_capture_index = i,
+                "local.reference" => local_ref_capture_index = i,
+                "local.scope" => local_scope_capture_index = i,
+                _ => {}
+            }
+        }
+
+        let recognized_names = match self.recognized_names {
+            Some(recognized_names) => recognized_names,
+            None => {
+                let mut all_highlight_names = Vec::new();
+                for capture_name in query.capture_names() {
+                    if !all_highlight_names.contains(capture_name) {
+                        all_highlight_names.push(capture_name.clone());
+                    }
+                }
+                all_highlight_names
+            }
+        };
+        let mut highlight_indices = Vec::with_capacity(query.capture_names().len());
+        let mut capture_parts = Vec::new();
+        for capture_name in query.capture_names() {
+            capture_parts.clear();
+            capture_parts.extend(capture_name.split('.'));
+            let mut best_index = None;
+            let mut best_match_len = 0;
+            for (i, recognized_name) in recognized_names.iter().enumerate() {
+                let mut len = 0;
+                let mut matches = true;
+                for part in recognized_name.split('.') {
+                    len += 1;
+                    if !capture_parts.contains(&part) {
+                        matches = false;
+                        break;
+                    }
+                }
+                if matches && len > best_match_len {
+                    best_index = Some(i);
+                    best_match_len = len;
+                }
+            }
+            highlight_indices.push(best_index.map(Highlight));
+        }
+
+        Ok(HighlightConfiguration {
+            language,
+            query,
+            combined_injections_query,
+            pattern_kinds,
+            highlight_indices,
+            non_local_variable_patterns,
+            injection_content_capture_index,
+            injection_language_capture_index,
+            local_def_capture_index,
+            local_def_value_capture_index,
+            local_ref_capture_index,
+            local_scope_capture_index,
+        })
+    }
+}
+
 /// Contains the data neeeded to higlight code written in a particular language.
 ///
 /// This struct is immutable and can be shared between threads.
@@ -44,8 +224,7 @@ pub struct HighlightConfiguration {
     pub language: Language,
     pub query: Query,
     combined_injections_query: Option<Query>,
-    locals_pattern_index: usize,
-    highlights_pattern_index: usize,
+    pattern_kinds: Vec<PatternKind>,
     highlight_indices: Vec<Option<Highlight>>,
     non_local_variable_patterns: Vec<bool>,
     injection_content_capture_index: Option<u32>,
@@ -165,171 +344,9 @@ impl Highlighter {
 }
 
 impl HighlightConfiguration {
-    /// Creates a `HighlightConfiguration` for a given `Language` and set of highlighting
-    /// queries.
-    ///
-    /// # Parameters
-    ///
-    /// * `language`  - The Tree-sitter `Language` that should be used for parsing.
-    /// * `highlights_query` - A string containing tree patterns for syntax highlighting. This
-    ///   should be non-empty, otherwise no syntax highlights will be added.
-    /// * `injections_query` -  A string containing tree patterns for injecting other languages
-    ///   into the document. This can be empty if no injections are desired.
-    /// * `locals_query` - A string containing tree patterns for tracking local variable
-    ///   definitions and references. This can be empty if local variable tracking is not needed.
-    ///
-    /// Returns a `HighlightConfiguration` that can then be used with the `highlight` method.
-    pub fn new(
-        language: Language,
-        highlights_query: &str,
-        injection_query: &str,
-        locals_query: &str,
-    ) -> Result<Self, QueryError> {
-        // Concatenate the query strings, keeping track of the start offset of each section.
-        let mut query_source = String::new();
-        query_source.push_str(injection_query);
-        let locals_query_offset = query_source.len();
-        query_source.push_str(locals_query);
-        let highlights_query_offset = query_source.len();
-        query_source.push_str(highlights_query);
-
-        // Construct a single query by concatenating the three query strings, but record the
-        // range of pattern indices that belong to each individual string.
-        let mut query = Query::new(language, &query_source)?;
-        let mut locals_pattern_index = 0;
-        let mut highlights_pattern_index = 0;
-        for i in 0..(query.pattern_count()) {
-            let pattern_offset = query.start_byte_for_pattern(i);
-            if pattern_offset < highlights_query_offset {
-                if pattern_offset < highlights_query_offset {
-                    highlights_pattern_index += 1;
-                }
-                if pattern_offset < locals_query_offset {
-                    locals_pattern_index += 1;
-                }
-            }
-        }
-
-        // Construct a separate query just for dealing with the 'combined injections'.
-        // Disable the combined injection patterns in the main query.
-        let mut combined_injections_query = Query::new(language, injection_query)?;
-        let mut has_combined_queries = false;
-        for pattern_index in 0..locals_pattern_index {
-            let settings = query.property_settings(pattern_index);
-            if settings.iter().any(|s| &*s.key == "injection.combined") {
-                has_combined_queries = true;
-                query.disable_pattern(pattern_index);
-            } else {
-                combined_injections_query.disable_pattern(pattern_index);
-            }
-        }
-        let combined_injections_query = if has_combined_queries {
-            Some(combined_injections_query)
-        } else {
-            None
-        };
-
-        // Find all of the highlighting patterns that are disabled for nodes that
-        // have been identified as local variables.
-        let non_local_variable_patterns = (0..query.pattern_count())
-            .map(|i| {
-                query
-                    .property_predicates(i)
-                    .iter()
-                    .any(|(prop, positive)| !*positive && prop.key.as_ref() == "local")
-            })
-            .collect();
-
-        // Store the numeric ids for all of the special captures.
-        let mut injection_content_capture_index = None;
-        let mut injection_language_capture_index = None;
-        let mut local_def_capture_index = None;
-        let mut local_def_value_capture_index = None;
-        let mut local_ref_capture_index = None;
-        let mut local_scope_capture_index = None;
-        for (i, name) in query.capture_names().iter().enumerate() {
-            let i = Some(i as u32);
-            match name.as_str() {
-                "injection.content" => injection_content_capture_index = i,
-                "injection.language" => injection_language_capture_index = i,
-                "local.definition" => local_def_capture_index = i,
-                "local.definition-value" => local_def_value_capture_index = i,
-                "local.reference" => local_ref_capture_index = i,
-                "local.scope" => local_scope_capture_index = i,
-                _ => {}
-            }
-        }
-
-        let highlight_indices = vec![None; query.capture_names().len()];
-        Ok(HighlightConfiguration {
-            language,
-            query,
-            combined_injections_query,
-            locals_pattern_index,
-            highlights_pattern_index,
-            highlight_indices,
-            non_local_variable_patterns,
-            injection_content_capture_index,
-            injection_language_capture_index,
-            local_def_capture_index,
-            local_def_value_capture_index,
-            local_ref_capture_index,
-            local_scope_capture_index,
-        })
-    }
-
     /// Get a slice containing all of the highlight names used in the configuration.
     pub fn names(&self) -> &[String] {
         self.query.capture_names()
-    }
-
-    /// Set the list of recognized highlight names.
-    ///
-    /// Tree-sitter syntax-highlighting queries specify highlights in the form of dot-separated
-    /// highlight names like `punctuation.bracket` and `function.method.builtin`. Consumers of
-    /// these queries can choose to recognize highlights with different levels of specificity.
-    /// For example, the string `function.builtin` will match against `function.method.builtin`
-    /// and `function.builtin.constructor`, but will not match `function.method`.
-    ///
-    /// When highlighting, results are returned as `Highlight` values, which contain the index
-    /// of the matched highlight this list of highlight names.
-    pub fn configure(&mut self, recognized_names: &[impl AsRef<str>]) {
-        let mut capture_parts = Vec::new();
-        self.highlight_indices.clear();
-        self.highlight_indices
-            .extend(self.query.capture_names().iter().map(move |capture_name| {
-                capture_parts.clear();
-                capture_parts.extend(capture_name.split('.'));
-
-                let mut best_index = None;
-                let mut best_match_len = 0;
-                for (i, recognized_name) in recognized_names.into_iter().enumerate() {
-                    let mut len = 0;
-                    let mut matches = true;
-                    for part in recognized_name.as_ref().split('.') {
-                        len += 1;
-                        if !capture_parts.contains(&part) {
-                            matches = false;
-                            break;
-                        }
-                    }
-                    if matches && len > best_match_len {
-                        best_index = Some(i);
-                        best_match_len = len;
-                    }
-                }
-                best_index.map(Highlight)
-            }));
-    }
-
-    pub fn configure_all_highlights(&mut self) {
-        let mut all_highlight_names = Vec::new();
-        for capture_name in self.query.capture_names() {
-            if !all_highlight_names.contains(capture_name) {
-                all_highlight_names.push(capture_name.clone());
-            }
-        }
-        self.configure(&all_highlight_names);
     }
 }
 
@@ -694,7 +711,7 @@ where
             let mut capture = match_.captures[capture_index];
 
             // If this capture represents an injection, then process the injection.
-            if match_.pattern_index < layer.config.locals_pattern_index {
+            if layer.config.pattern_kinds[match_.pattern_index] == PatternKind::Injections {
                 let (language_name, content_node, include_children) =
                     injection_for_match(&layer.config, &layer.config.query, &match_, &self.source);
 
@@ -745,7 +762,7 @@ where
             // local variable info.
             let mut reference_highlight = None;
             let mut definition_highlight = None;
-            while match_.pattern_index < layer.config.highlights_pattern_index {
+            while layer.config.pattern_kinds[match_.pattern_index] == PatternKind::Locals {
                 // If the node represents a local scope, push a new local scope onto
                 // the scope stack.
                 if Some(capture.index) == layer.config.local_scope_capture_index {

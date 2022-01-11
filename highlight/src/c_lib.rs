@@ -1,4 +1,7 @@
-use super::{Error, Highlight, HighlightConfiguration, Highlighter, HtmlRenderer};
+use super::{
+    Error, Highlight, HighlightConfiguration, HighlightConfigurationBuilder, Highlighter,
+    HtmlRenderer,
+};
 use regex::Regex;
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -109,10 +112,12 @@ pub extern "C" fn ts_highlighter_add_language(
             ""
         };
 
-        let mut config =
-            HighlightConfiguration::new(language, highlight_query, injection_query, locals_query)
-                .or(Err(ErrorCode::InvalidQuery))?;
-        config.configure(&this.highlight_names.as_slice());
+        let mut builder = HighlightConfigurationBuilder::new();
+        builder.add_highlights_query_part(highlight_query);
+        builder.add_injections_query_part(injection_query);
+        builder.add_locals_query_part(locals_query);
+        builder.set_recognized_names(this.highlight_names.clone());
+        let config = builder.build(language).or(Err(ErrorCode::InvalidQuery))?;
         this.languages.insert(scope_name, (injection_regex, config));
 
         Ok(())

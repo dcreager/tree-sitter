@@ -8,19 +8,22 @@ use tree_sitter_highlight::{
 };
 
 lazy_static! {
-    static ref JS_HIGHLIGHT: HighlightConfiguration =
-        get_highlight_config("javascript", Some("injections.scm"), &HIGHLIGHT_NAMES);
+    static ref JS_HIGHLIGHT: HighlightConfiguration = get_highlight_config(
+        "javascript",
+        Some("injections.scm"),
+        HIGHLIGHT_NAMES.clone()
+    );
     static ref JSDOC_HIGHLIGHT: HighlightConfiguration =
-        get_highlight_config("jsdoc", None, &HIGHLIGHT_NAMES);
+        get_highlight_config("jsdoc", None, HIGHLIGHT_NAMES.clone());
     static ref HTML_HIGHLIGHT: HighlightConfiguration =
-        get_highlight_config("html", Some("injections.scm"), &HIGHLIGHT_NAMES);
+        get_highlight_config("html", Some("injections.scm"), HIGHLIGHT_NAMES.clone());
     static ref EJS_HIGHLIGHT: HighlightConfiguration = get_highlight_config(
         "embedded-template",
         Some("injections-ejs.scm"),
-        &HIGHLIGHT_NAMES
+        HIGHLIGHT_NAMES.clone()
     );
     static ref RUST_HIGHLIGHT: HighlightConfiguration =
-        get_highlight_config("rust", Some("injections.scm"), &HIGHLIGHT_NAMES);
+        get_highlight_config("rust", Some("injections.scm"), HIGHLIGHT_NAMES.clone());
     static ref HIGHLIGHT_NAMES: Vec<String> = [
         "attribute",
         "carriage-return",
